@@ -1,66 +1,98 @@
-const { DateTime } = require("luxon");
-const pluginNavigation = require("@11ty/eleventy-navigation");
 
-/**
- * This is the JavaScript code that sets the config for your Eleventy site
- *
- * You can add customizations here to define how the site builds your content
- * Try extending it to suit your needs!
- */
+// PA-API Proxy Server for Amazon.co.uk (Node.js - Express)
+const express = require('express');
+const axios = require('axios');
+const crypto = require('crypto');
+const app = express();
+app.use(express.json());
 
-module.exports = function (eleventyConfig) {
-  eleventyConfig.setTemplateFormats([
-    // Templates:
-    "html",
-    "njk",
-    "md",
-    // Static Assets:
-    "css",
-    "jpeg",
-    "jpg",
-    "png",
-    "svg",
-  ]);
+// Amazon PA-API kimlik bilgilerin
+const accessKey = "AKPARDAVAW1753296566";
+const secretKey = "oVY7pKxfN/igQjMr5Kf3XXFg3DVXKkYk/Tkrt3tV";
+const associateTag = "timur07-21"; // Amazon UK associates tag
 
-  eleventyConfig.addPlugin(pluginNavigation);
-  eleventyConfig.addPassthroughCopy("assets");
-  eleventyConfig.setBrowserSyncConfig({ ghostMode: false });
+// BÃ¶lge ve servis ayarlarÄ± UK iÃ§in
+const region = "eu-west-1";
+const service = "ProductAdvertisingAPI";
+const host = "webservices.amazon.co.uk";
+const endpoint = "https://webservices.amazon.co.uk/paapi5/searchitems";
 
-  // Filters let you modify the content https://www.11ty.dev/docs/filters/
-  eleventyConfig.addFilter("htmlDateString", (dateObj) => {
-    return DateTime.fromJSDate(dateObj, { zone: "utc" }).toFormat(
-      "dd LLL yyyy"
-    );
+// AWS4 Signature v4 fonksiyonlarÄ±
+function sign(key, msg) {
+  return crypto.createHmac('sha256', key).update(msg).digest();
+}
+function getSignatureKey(key, dateStamp, regionName, serviceName) {
+  const kDate = sign('AWS4' + key, dateStamp);
+  const kRegion = sign(kDate, regionName);
+  const kService = sign(kRegion, serviceName);
+  const kSigning = sign(kService, 'aws4_request');
+  return kSigning;
+}
+
+// Proxy endpoint: /search
+app.post('/search', async (req, res) => {
+  const keywords = req.body.keywords || "headphones";
+  const payload = JSON.stringify({
+    "Keywords": keywords,
+    "SearchIndex": "All",
+    "PartnerTag": associateTag,
+    "PartnerType": "Associates",
+    "Marketplace": "www.amazon.co.uk"
   });
 
-  // Build the collection of posts to list in the site
-  eleventyConfig.addCollection("posts", function (collection) {
-    /* The posts collection includes all posts that list 'posts' in the front matter 'tags'
-         - https://www.11ty.dev/docs/collections/
-      */
+  // Zaman damgasÄ± oluÅŸturma
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.substring(0, 8);
 
-    const coll = collection
-      .getFilteredByTag("posts")
-      .sort((a, b) => b.data.date - a.data.date);
+  const canonicalUri = '/paapi5/searchitems';
+  const canonicalQuerystring = '';
+  const canonicalHeaders = 
+    'content-encoding:amz-1.0\n' +
+    'content-type:application/json; charset=utf-8\n' +
+    'host:' + host + '\n' +
+    'x-amz-date:' + amzDate + '\n';
+  const signedHeaders = 'content-encoding;content-type;host;x-amz-date';
 
-    // Adds {{ prevPost.url }} {{ prevPost.data.title }}, etc, to our njks templates
-    for (let i = 0; i < coll.length; i++) {
-      const prevPost = coll[i - 1];
-      const nextPost = coll[i + 1];
+  const hashedPayload = crypto.createHash('sha256').update(payload).digest('hex');
+  const canonicalRequest = 
+    'POST\n' + canonicalUri + '\n' + canonicalQuerystring + '\n' +
+    canonicalHeaders + '\n' + signedHeaders + '\n' + hashedPayload;
 
-      coll[i].data["prevPost"] = prevPost;
-      coll[i].data["nextPost"] = nextPost;
-    }
+  const algorithm = 'AWS4-HMAC-SHA256';
+  const credentialScope = dateStamp + '/' + region + '/' + service + '/aws4_request';
+  const stringToSign =
+    algorithm + '\n' +
+    amzDate + '\n' +
+    credentialScope + '\n' +
+    crypto.createHash('sha256').update(canonicalRequest).digest('hex');
 
-    return coll;
-  });
+  // Ä°mzalama
+  const signingKey = getSignatureKey(secretKey, dateStamp, region, service);
+  const signature = crypto.createHmac('sha256', signingKey).update(stringToSign).digest('hex');
 
-  return {
-    dir: {
-      input: "source",
-      includes: "_layouts",
-      data: "_data",
-      output: "./deploy/_site",
-    },
-  };
-};
+  const authorizationHeader = 
+    algorithm + ' ' +
+    'Credential=' + accessKey + '/' + credentialScope + ', ' +
+    'SignedHeaders=' + signedHeaders + ', ' +
+    'Signature=' + signature;
+
+  try {
+    const response = await axios.post(endpoint, payload, {
+      headers: {
+        'Content-Encoding': 'amz-1.0',
+        'Content-Type': 'application/json; charset=utf-8',
+        'Host': host,
+        'X-Amz-Date': amzDate,
+        'Authorization': authorizationHeader
+      }
+    });
+    res.json(response.data);
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).send(err.response?.data || err.message);
+  }
+});
+
+// Sunucu portu
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('UK PA-API proxy running on port ' + PORT));
